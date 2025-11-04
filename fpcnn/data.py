@@ -11,7 +11,7 @@ from math import comb
 from functools import reduce, lru_cache
 
 import numpy as np
-import fplib
+import libfp
 from pymatgen.core.structure import Structure
 from pymatgen.io.ase import AseAtomsAdaptor
 from ase.io import read as ase_read
@@ -155,22 +155,21 @@ def collate_pool(dataset_list):
     ----------
 
     dataset_list: list of tuples for each data point.
-      For IdTargetData: (struct_id, target)
-      For StructData: ((atom_fea, nbr_fea, nbr_fea_idx, angle_fea), target, struct_id)
+      For IdTargetData/TensorTargetData: (struct_id, target)
+      For StructData: ((atom_fea, nbr_fea, nbr_fea_idx), target, struct_id)
 
       atom_fea: torch.Tensor shape (n_i, atom_fea_len)
       nbr_fea: torch.Tensor shape (n_i, M, nbr_fea_len)
       nbr_fea_idx: torch.LongTensor shape (n_i, M)
-      angle_fea: torch.Tensor shape (n_i, num_angles, angle_fea_len)
-      target: torch.Tensor shape (1, )
+      target: float or np.ndarray (for scalar or tensor properties)
       struct_id: str or int
 
     Returns
     -------
     N = sum(n_i); N0 = sum(i)
 
-    For IdTargetData:
-      batch_target: torch.Tensor shape (N, 1)
+    For IdTargetData/TensorTargetData:
+      batch_target: torch.Tensor shape (N0, out_dim)
       batch_struct_ids: list
 
     For StructData:
@@ -182,17 +181,20 @@ def collate_pool(dataset_list):
         Indices of M neighbors of each atom
       crystal_atom_idx: list of torch.LongTensor of length N0
         Mapping from the crystal idx to atom idx
-      batch_target: torch.Tensor shape (N, 1)
+      batch_target: torch.Tensor shape (N0, out_dim)
         Target value for prediction
       batch_struct_ids: list
     """
-    # IdTargetData
+    # IdTargetData or TensorTargetData
     if isinstance(dataset_list[0], tuple) and len(dataset_list[0]) == 2:
         batch_target, batch_struct_ids = [], []
         for struct_id, target in dataset_list:
-            batch_target.append(torch.tensor([float(target)], dtype=torch.float))
+            if isinstance(target, np.ndarray):
+                batch_target.append(torch.tensor(target, dtype=torch.float))
+            else:
+                batch_target.append(torch.tensor([float(target)], dtype=torch.float))
             batch_struct_ids.append(struct_id)
-        return torch.cat(batch_target, dim=0), batch_struct_ids
+        return torch.stack(batch_target, dim=0), batch_struct_ids
     
     # StructData
     elif isinstance(dataset_list[0], tuple) and len(dataset_list[0]) == 3:
@@ -210,9 +212,15 @@ def collate_pool(dataset_list):
             batch_nbr_fea_idx.append(nbr_fea_idx + base_idx)
             
             crystal_atom_idx.append(torch.LongTensor(np.arange(n_i) + base_idx))
-            if not isinstance(target, torch.Tensor):
-                target = torch.tensor([float(target)], dtype=torch.float)
-            batch_target.append(target)
+            
+            if isinstance(target, np.ndarray):
+                target_tensor = torch.tensor(target, dtype=torch.float)
+            elif not isinstance(target, torch.Tensor):
+                target_tensor = torch.tensor([float(target)], dtype=torch.float)
+            else:
+                target_tensor = target
+            
+            batch_target.append(target_tensor)
             batch_struct_ids.append(struct_id)
             
             base_idx += n_i
@@ -223,7 +231,7 @@ def collate_pool(dataset_list):
         batch_nbr_fea_idx = torch.cat(batch_nbr_fea_idx, dim=0)
             
         # Stack targets
-        batch_target = torch.stack(batch_target)
+        batch_target = torch.stack(batch_target, dim=0)
         
         return (batch_atom_fea,
                 batch_nbr_fea,
@@ -314,6 +322,57 @@ class IdTargetData(Dataset):
     def __getitem__(self, idx):
         struct_id, target = self.id_prop_data[idx]
         return struct_id, float(target)
+
+
+class TensorTargetData(Dataset):
+    """
+    Dataset to load struct_id and multi-component tensor targets from id_prop.csv.
+    For tensor properties (vector, matrix, etc.), id_prop.csv has multiple columns:
+    struct_id, component_1, component_2, ..., component_n
+
+    Parameters
+    ----------
+
+    root_dir: str
+        The path to the root directory of the dataset
+    random_seed: int
+        Random seed for shuffling the dataset.
+    out_dim: int
+        Number of target components (columns after struct_id)
+
+    Returns
+    -------
+
+    struct_id: str or int
+    target: torch.Tensor shape (out_dim, )
+    """
+    def __init__(self, root_dir, out_dim, random_seed=42):
+        self.root_dir = root_dir
+        self.out_dim = out_dim
+        id_prop_file = os.path.join(self.root_dir, 'id_prop.csv')
+        assert os.path.isfile(id_prop_file), 'id_prop.csv does not exist!'
+        with open(id_prop_file) as f:
+            reader = csv.reader(f, delimiter=',')
+            self.id_prop_data = [row for row in reader]
+        
+        if len(self.id_prop_data) > 0:
+            n_cols = len(self.id_prop_data[0])
+            assert n_cols == out_dim + 1, \
+                f'CSV has {n_cols} columns but expected {out_dim + 1} (1 for ID + {out_dim} for targets)'
+        
+        random.seed(random_seed)
+        random.shuffle(self.id_prop_data)
+
+    def __len__(self):
+        return len(self.id_prop_data)
+
+    def __getitem__(self, idx):
+        row = self.id_prop_data[idx]
+        struct_id = row[0]
+        target = np.array([float(val) for val in row[1:]], dtype=np.float32)
+        assert len(target) == self.out_dim, \
+            f'Expected {self.out_dim} components but got {len(target)}'
+        return struct_id, target
 
 def get_neighbor_info(atoms, radius, max_num_nbr, struct_id=None):
     """
@@ -526,7 +585,7 @@ class StructData(Dataset):
                 fp = np.zeros((len(rxyz), lseg*natx), dtype=np.float64)
         else:
             if contract:
-                fp = fplib.get_sfp(cell,
+                fp = libfp.get_sfp(cell,
                                    cutoff=cutoff,
                                    natx=natx,
                                    log=False,
@@ -538,7 +597,7 @@ class StructData(Dataset):
                         tmp_fp.append(tmp_fp_at)
                 fp = np.array(tmp_fp, dtype=np.float64)
             else:
-                fp = fplib.get_lfp(cell,
+                fp = libfp.get_lfp(cell,
                                    cutoff=cutoff,
                                    natx=natx,
                                    log=False,
@@ -594,7 +653,12 @@ class StructData(Dataset):
 
     def __getitem__(self, idx):
         """Get a single data point"""
-        struct_id, target = self.id_prop_data[idx]
+        row = self.id_prop_data[idx]
+        struct_id = row[0]
+        if len(row) == 2:
+            target = row[1]
+        else:
+            target = np.array([float(val) for val in row[1:]], dtype=np.float32)
         
         # If data is already processed
         if hasattr(self, 'processed_data') and self.processed_data is not None:
@@ -619,7 +683,13 @@ class StructData(Dataset):
         return crystal
 
     def process_item(self, idx):
-        struct_id, target = self.id_prop_data[idx]
+        row = self.id_prop_data[idx]
+        struct_id = row[0]
+        if len(row) == 2:
+            target = row[1]
+        else:
+            target = np.array([float(val) for val in row[1:]], dtype=np.float32)
+        
         crystal = self.read_structure(struct_id)
         atom_fea, nbr_fea, nbr_fea_idx = self.process_structure(crystal, struct_id)
 
@@ -639,7 +709,7 @@ class StructData(Dataset):
         self.processed_data = []
         
         # Get the struct_ids we need
-        batch_struct_ids = set(sid for sid, _ in self.id_prop_data)
+        batch_struct_ids = set(row[0] for row in self.id_prop_data)
         
         # If loading full dataset
         if len(batch_struct_ids) == self.total_size:
@@ -662,7 +732,7 @@ class StructData(Dataset):
             for i in range(0, self.total_size, self.batch_size):
                 end_index = min(i + self.batch_size, self.total_size)
                 for j in range(i, end_index):
-                    struct_id, _ = self.id_prop_data[j]
+                    struct_id = self.id_prop_data[j][0]
                     struct_to_batch[struct_id] = batch_idx
                 batch_idx += 1
             
@@ -695,7 +765,13 @@ class StructData(Dataset):
             # Process batch
             batch_data = []
             for j in range(start_idx, end_idx):
-                struct_id, target = self.id_prop_data[j]
+                row = self.id_prop_data[j]
+                struct_id = row[0]
+                if len(row) == 2:
+                    target = row[1]
+                else:
+                    target = np.array([float(val) for val in row[1:]], dtype=np.float32)
+                
                 crystal = self.read_structure(struct_id)
                 atom_fea, nbr_fea, nbr_fea_idx = self.process_structure(crystal, struct_id)
                 batch_data.append(((atom_fea, nbr_fea, nbr_fea_idx), target, struct_id))

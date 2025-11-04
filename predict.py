@@ -143,7 +143,8 @@ def main():
         h_fea_len=model_args.h_fea_len,
         n_conv=model_args.n_conv,
         n_h=model_args.n_h,
-        classification=True if model_args.task == 'classification' else False
+        classification=True if model_args.task == 'classification' else False,
+        out_dim=getattr(model_args, 'out_dim', 1)
     )
     
     # Initialize normalizer
@@ -239,7 +240,11 @@ def validate(val_loader, model, normalizer, test=False):
         # Store predictions
         if model_args.task == 'regression':
             pred = normalizer.denorm(output.data.cpu())
-            test_preds += pred.view(-1).tolist()
+            out_dim = getattr(model_args, 'out_dim', 1)
+            if out_dim > 1:
+                test_preds += pred.tolist()
+            else:
+                test_preds += pred.view(-1).tolist()
         else:
             pred = torch.exp(output.data.cpu())
             test_preds += pred[:, 1].tolist()
@@ -250,17 +255,31 @@ def validate(val_loader, model, normalizer, test=False):
     dataset = None
 
     # Output predictions
+    out_dim = getattr(model_args, 'out_dim', 1)
     if test:
         # Save to CSV
         print("\nSaving predictions to target_predicted.csv")
         with open('target_predicted.csv', 'w') as f:
             for struct_id, pred in zip(test_struct_ids, test_preds):
-                f.write(f'{struct_id},{pred}\n')
+                if out_dim > 1:
+                    if isinstance(pred, list):
+                        pred_str = ','.join([f'{p:.16f}' for p in pred])
+                    else:
+                        pred_str = f'{pred:.16f}'
+                    f.write(f'{struct_id},{pred_str}\n')
+                else:
+                    f.write(f'{struct_id},{pred}\n')
     else:
         # Print to screen
         print("\nPredictions:")
         for struct_id, pred in zip(test_struct_ids, test_preds):
-            if model_args.task == 'classification':
+            if out_dim > 1:
+                if isinstance(pred, list):
+                    pred_str = ','.join([f'{p:.16f}' for p in pred])
+                else:
+                    pred_str = f'{pred:.16f}'
+                print(f"{struct_id},{pred_str}")
+            elif model_args.task == 'classification':
                 print(f"{struct_id},{pred:.16f}")
             else:
                 print(f"{struct_id},{pred:.16f}")
@@ -272,8 +291,12 @@ class Normalizer(object):
     def __init__(self, tensor):
         """tensor is taken as a sample to calculate the mean and std"""
         if isinstance(tensor, torch.Tensor):
-            self.mean = torch.mean(tensor)
-            self.std = torch.std(tensor)
+            if tensor.dim() > 1:
+                self.mean = torch.mean(tensor, dim=0, keepdim=False)
+                self.std = torch.std(tensor, dim=0, keepdim=False)
+            else:
+                self.mean = torch.mean(tensor)
+                self.std = torch.std(tensor)
         else:
             self.mean = tensor
             self.std = 1.0

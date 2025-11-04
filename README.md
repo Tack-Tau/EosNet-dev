@@ -8,6 +8,11 @@
 
 ## Change log
 
+- **Extended to support tensor properties prediction** (elasticity tensors, dielectric tensors, etc.)
+  - Added `--out-dim` argument to specify number of output components (1 for scalar, 3 for vector, 6/21/36 for tensors)
+  - Introduced `TensorTargetData` class to handle multi-column CSV format for tensor properties
+  - Updated model architecture to output configurable dimensions
+  - Updated `Normalizer` to handle component-wise normalization for tensor targets
 - Using atomic-centered Gaussian Overlap Matrix (GOM) Fingerprint vectors as atomic features
 - Switch reading pymatgen structures from CIF to POSCAR
 - Add `drop_last` option in `get_train_val_test_loader`
@@ -23,46 +28,7 @@
 - Use `IdTargetData` for `get_train_val_test_loader()`, and get `struct_data` from `StructData` by batches
 - Saving the `processed_data` to multiple `npz` files under `saved_npz_files` directory instead of one big file
 - Save both `train_results.csv` and `test_results.csv` at the end of training
-- Switching from [Python3 implementation](https://github.com/Tack-Tau/fplib3/) of the Fingerprint Library to [C implementation](https://github.com/Rutgers-ZRG/libfp) to improve speed. \
-  (Optional) Modify the `setup.py` in `fplib` if you use `conda` to install LAPACK:
-  ```python
-  lapack_dir=["$CONDA_PREFIX/lib"]
-  lapack_lib=['openblas']
-  extra_link_args = ["-Wl,-rpath,$CONDA_PREFIX/lib"]
-  .
-  .
-  .
-  include_dirs = [source_dir, "$CONDA_PREFIX/include"]
-  ```
-  if you use `brew` to install LAPACK:
-  ```python
-  lapack_dir=["$HOMEBREW_PREFIX/opt/openblas/lib"]
-  lapack_lib=['openblas']
-  extra_link_args = ['-framework', 'Accelerate',
-                     "-Wl,-rpath,$HOMEBREW_PREFIX/opt/openblas/lib"]
-  .
-  .
-  .
-  include_dirs = [source_dir, "$HOMEBREW_PREFIX/opt/openblas/include"]
-  ```
-  you probably need to modify your `~/.bashrc` file for compiler to find the correct LAPACK library:
-  ```bash
-  # If you use `conda install conda-forge::lapack`
-  export DYLD_LIBRARY_PATH="$CONDA_PREFIX/lib:$DYLD_LIBRARY_PATH"
-  # If you use `brew install openblas`
-  export CFLAGS="-I/opt/homebrew/opt/openblas/include $CFLAGS"
-  export LDFLAGS="-L/opt/homebrew/opt/openblas/lib $LDFLAGS"
-  ```
-  Then install the Fingerprint library (Snapshot of `fplib-3.1.2` ):
-  ```bash
-  conda create -n fplibenv python=3.10 pip ; conda activate fplibenv
-  python3 -m pip install -U pip setuptools wheel
-  git clone https://github.com/Tack-Tau/fplib.git
-  cd fplib ; git checkout fplib_3.1.2
-  python3 -m pip install .
-  ```
-  For the remaining EOSNet dependecies follow the original instruction. \
-  **Note**: ~~Currently only `lmax=0` is supported in the C version~~
+- Switched to [libfp](https://github.com/Rutgers-ZRG/libfp) (C implementation with Python interface) for faster fingerprint calculation
 
 This package is based on the [Crystal Graph Convolutional Neural Networks]((https://link.aps.org/doi/10.1103/PhysRevLett.120.145301)) that takes an arbitary crystal structure to predict material properties. 
 
@@ -75,21 +41,59 @@ The package provides two major functions:
 
 This package requires:
 
-- [fplib](https://github.com/Tack-Tau/fplib)
+- [libfp](https://github.com/Rutgers-ZRG/libfp) - C implementation of the fingerprint library with Python interface
 - [PyTorch](http://pytorch.org)
 - [scikit-learn](http://scikit-learn.org/stable/)
 - [pymatgen](http://pymatgen.org)
 - [ASE](https://wiki.fysik.dtu.dk/ase/)
-- ~~[Numba](https://numba.pydata.org/)~~ (Numba is no longer needed since we are switching from `fplib3` to `fplib_c`)
 
-If you are new to Python, please [conda](https://conda.io/docs/index.html) to manage Python packages and environments.
+If you are new to Python, please use [conda](https://conda.io/docs/index.html) to manage Python packages and environments.
 
+### Installation Steps
+
+1. **Create and activate a conda environment:**
 ```bash
-conda activate fplibenv
+conda create -n eosnet python=3.10 pip
+conda activate eosnet
+python3 -m pip install -U pip setuptools wheel
+```
+
+2. **Install libfp (fingerprint library):**
+
+   **Option A: Install from PyPI (recommended):**
+   ```bash
+   pip install libfp
+   ```
+
+   **Option B: Install from source:**
+   ```bash
+   git clone https://github.com/Rutgers-ZRG/libfp.git
+   cd libfp
+   pip install .
+   cd ..
+   ```
+
+   **Prerequisites for libfp:**
+   - C compiler (gcc, clang, etc.)
+   - Python development headers
+   - LAPACK/OpenBLAS/MKL
+
+   If you encounter LAPACK-related issues, install OpenBLAS:
+   ```bash
+   # Using conda
+   conda install -c conda-forge openblas
+   
+   # Using Homebrew (macOS)
+   brew install openblas
+   ```
+
+3. **Install remaining dependencies:**
+```bash
 python3 -m pip install numpy>=1.21.4 scipy>=1.8.0 ase==3.22.1
 python3 -m pip install scikit-learn torch==2.2.2 torchvision==0.17.2 pymatgen==2024.3.1
 ```
-The above environment has been tested stable for both M-chip MacOS and CentOS clusters
+
+The above environment has been tested stable for both M-series macOS and Linux clusters.
 
 ## Check your strcuture files before use EOSNet
 
@@ -102,7 +106,7 @@ import os
 import sys
 import numpy as np
 from functools import reduce
-import fplib
+import libfp
 from ase.io import read as ase_read
 
 def get_ixyz(lat, cutoff):
@@ -180,8 +184,8 @@ if __name__ == "__main__":
             if len(rxyz) != len(types) or len(set(types)) != len(znucl):
                 print(str(filename) + " is glitchy !")
             else:
-                fp = fplib.get_lfp(cell, cutoff=cutoff, natx=natx, log=False) # Long Fingerprint
-                # fp = fplib.get_sfp(cell, cutoff=cutoff, natx=natx, log=False)   # Contracted Fingerprint         
+                fp = libfp.get_lfp(cell, cutoff=cutoff, natx=natx, log=False) # Long Fingerprint
+                # fp = libfp.get_sfp(cell, cutoff=cutoff, natx=natx, log=False)   # Contracted Fingerprint         
 ```
 
 ## Usage
@@ -212,6 +216,40 @@ root_dir
 ├── ...
 ```
 
+### Tensor Properties Support
+
+EOSNet now supports predicting crystal-level tensor properties (e.g., elasticity tensors, dielectric tensors) in addition to scalar properties.
+
+#### Data Format for Tensor Properties
+
+For tensor properties, the `id_prop.csv` file should contain multiple columns:
+
+```csv
+struct_id, component_1, component_2, ..., component_n
+mp-001, 142.81, 54.37, 47.75, 0.0, 0.0, 0.0, ...
+mp-002, 215.33, 89.12, 78.44, 0.5, -0.2, 0.1, ...
+```
+
+**Common tensor types and their dimensions:**
+
+| Target Type | `out_dim` | Format | Example |
+|-------------|-----------|--------|---------|
+| Scalar (energy, band gap) | 1 | `id,val` | Formation energy |
+| Vector (polarization) | 3 | `id,Px,Py,Pz` | Electric polarization |
+| 2nd-rank symmetric (dielectric, stress) | 6 | `id,xx,yy,zz,yz,xz,xy` | Voigt notation |
+| 4th-rank elasticity (symmetric) | 21 | `id,C11,C12,...,C66` | Independent components |
+| 4th-rank elasticity (full) | 36 | `id,C11,...,C66` | Full 6×6 matrix |
+
+For elasticity tensors, the 21 independent components in Voigt notation are stored as:
+```
+C11, C12, C13, C14, C15, C16,
+     C22, C23, C24, C25, C26,
+          C33, C34, C35, C36,
+               C44, C45, C46,
+                    C55, C56,
+                         C66
+```
+
 ### Train a GNN model
 
 Before training a new GNN model, you will need to:
@@ -230,9 +268,25 @@ For detailed info of setting tags you can run
 python3 train.py -h
 ```
 
+**Scalar properties:**
 ```bash
 python3 train.py root_dir --save_to_disk true --disable-mps --task regression --workers 7 --epochs 500 --batch-size 64 --optim 'Adam' --train-ratio 0.8 --val-ratio 0.1 --test-ratio 0.1 --n-conv 3 --n-h 1 --lr 1e-3 --warmup-epochs 20 --lr-milestones 100 200 400 --weight-decay 0 | tee EOSNet_log.txt
 ```
+
+**Tensor properties (e.g., elasticity):**
+```bash
+python3 train.py ./mp_elast_2000 --out-dim 21 --task regression \
+  --train-ratio 0.8 --val-ratio 0.1 --test-ratio 0.1 \
+  --epochs 500 --batch-size 64 --lr 1e-3 --workers 0 --disable-mps \
+  --save_to_disk true | tee elasticity_log.txt
+```
+
+The `--out-dim` argument specifies the number of output components:
+- `--out-dim 1`: Scalar (default)
+- `--out-dim 3`: Vector properties
+- `--out-dim 6`: Symmetric 2nd-rank tensor (Voigt)
+- `--out-dim 21`: Elasticity tensor (21 independent components)
+- `--out-dim 36`: Full 6×6 elasticity tensor
 
 To resume from a previous `checkpoint`
 
@@ -255,6 +309,51 @@ python predict.py pre-trained.pth.tar --save_to_disk false --test root_dir
 ```
 
 **Note**: you need to put some random numbers in `id_prop.csv` and the `struct_id`s are the structures you want to predict.
+
+For tensor properties, the pre-trained model automatically detects the output dimension from its saved configuration. The output CSV will contain all predicted components:
+```csv
+id,target,prediction
+mp-001,142.81 54.37 47.75 ...,145.23 52.11 49.34 ...
+```
+
+## Performance Notes
+
+### Typical Performance for Elasticity Prediction
+
+When training on Materials Project elasticity data (~2000 structures):
+- **Training time**: ~5-10 minutes per epoch (M-series Mac with MPS disabled, 0 workers)
+- **Typical MAE**: 30-40 GPa per component (good performance)
+- **Excellent MAE**: < 20 GPa
+- **Acceptable MAE**: 40-60 GPa
+
+The MAE is reported in the physical units (GPa for elasticity) while the loss is computed on normalized data for stable training.
+
+### Segmentation Fault Issues on macOS
+
+If you encounter segmentation faults when processing structures (especially on macOS), this is typically caused by **conflicting OpenMP runtimes** between conda-forge's OpenBLAS and Apple's system libraries.
+
+**Root Cause:** The default conda-forge OpenBLAS uses OpenMP threading (`openmp_` build), which conflicts with Apple's libiomp5 and causes segfaults in `libfp`'s C extensions.
+
+**Recommended Solution:** Switch to pthread-based OpenBLAS
+
+1. **Replace OpenMP OpenBLAS with pthread build:**
+   ```bash
+   conda activate fplibenv  # or your environment name
+   conda install "libopenblas=*=*pthread*" -c conda-forge --force-reinstall
+   ```
+
+2. **Verify the installation:**
+   ```bash
+   conda list | grep libopenblas
+   # Should show: libopenblas  X.X.XX  pthreads_hXXXXXXX_X
+   ```
+
+3. **Reinstall libfp to link against new pthread OpenBLAS:**
+   ```bash
+   pip uninstall libfp -y
+   pip install libfp --no-cache-dir
+   ```
+
 
 ## How to cite
 
@@ -293,22 +392,21 @@ For CGCNN framework, please cite:
 }
 ```
 
-If you use [Python3 implementation](https://github.com/Tack-Tau/fplib3/) of the Fingerprint Library, please cite:
-```@article{taoAcceleratingStructuralOptimization2024,
-  title = {Accelerating Structural Optimization through Fingerprinting Space Integration on the Potential Energy Surface},
-  author = {Tao, Shuo and Shao, Xuecheng and Zhu, Li},
-  year = {2024},
-  month = mar,
+If you use the [libfp library](https://github.com/Rutgers-ZRG/libfp), please cite:
+```
+@article{taoEOSnetEmbeddedOverlap2025,
+  title = {EOSnet: Embedded Overlap Structures for Graph Neural Networks in Predicting Material Properties},
+  author = {Tao, Shuo and Zhu, Li},
   journal = {J. Phys. Chem. Lett.},
-  volume = {15},
-  number = {11},
-  pages = {3185--3190},
-  doi = {10.1021/acs.jpclett.4c00275},
-  url = {https://pubs.acs.org/doi/10.1021/acs.jpclett.4c00275}
+  volume = {16},
+  pages = {717-724},
+  year = {2025},
+  doi = {10.1021/acs.jpclett.4c03179},
+  url = {https://doi.org/10.1021/acs.jpclett.4c03179}
 }
 ```
 
-If you use [C implementation](https://github.com/zhuligs/fplib) of the Fingerprint Library, please cite:
+And the original fingerprint algorithm paper:
 ```
 @article{zhuFingerprintBasedMetric2016,
   title = {A Fingerprint Based Metric for Measuring Similarities of Crystalline Structures},

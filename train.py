@@ -22,7 +22,7 @@ from torch.optim.lr_scheduler import StepLR, SequentialLR, LinearLR
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.multiprocessing import set_sharing_strategy, get_context
 
-from fpcnn.data import IdTargetData, StructData
+from fpcnn.data import IdTargetData, TensorTargetData, StructData
 from fpcnn.data import collate_pool, get_train_val_test_loader
 from fpcnn.model import CrystalGraphConvNet
 
@@ -120,6 +120,8 @@ parser.add_argument('--n-conv', default=3, type=int, metavar='N',
                     help='number of conv layers')
 parser.add_argument('--n-h', default=1, type=int, metavar='N',
                     help='number of hidden layers after pooling')
+parser.add_argument('--out-dim', default=1, type=int, metavar='N',
+                    help='number of output components (1 for scalar, >1 for tensor properties)')
 
 args = parser.parse_args(sys.argv[1:])
 
@@ -144,9 +146,14 @@ else:
 
 def main():
     global args, best_mae_error, class_weights
-    # Load IdTargetData
-    id_target_dataset = IdTargetData(root_dir=args.root_dir,
-                                     random_seed=args.random_seed)
+    # Load IdTargetData or TensorTargetData based on out_dim
+    if args.out_dim > 1:
+        id_target_dataset = TensorTargetData(root_dir=args.root_dir,
+                                             out_dim=args.out_dim,
+                                             random_seed=args.random_seed)
+    else:
+        id_target_dataset = IdTargetData(root_dir=args.root_dir,
+                                         random_seed=args.random_seed)
     
     # Get train/val/test splits using IdTargetData
     class_weights, id_train_loader, id_val_loader, id_test_loader = get_train_val_test_loader(
@@ -225,7 +232,16 @@ def main():
         
         # Use id_target_dataset directly
         sample_data_list = [id_target_dataset[i] for i in sample_indices]
-        sample_target = torch.tensor([target for _, target in sample_data_list], dtype=torch.float)
+        if args.out_dim > 1:
+            sample_targets = []
+            for _, target in sample_data_list:
+                if isinstance(target, np.ndarray):
+                    sample_targets.append(torch.tensor(target, dtype=torch.float))
+                else:
+                    sample_targets.append(torch.tensor([float(target)], dtype=torch.float))
+            sample_target = torch.stack(sample_targets, dim=0)
+        else:
+            sample_target = torch.tensor([target for _, target in sample_data_list], dtype=torch.float)
         normalizer = Normalizer(sample_target)
 
     # build model
@@ -236,7 +252,8 @@ def main():
         h_fea_len=args.h_fea_len,
         n_conv=args.n_conv,
         n_h=args.n_h,
-        classification=True if args.task == 'classification' else False
+        classification=True if args.task == 'classification' else False,
+        out_dim=args.out_dim
     )
 
     if args.cuda:
@@ -396,7 +413,7 @@ def train(id_loader, model, criterion, optimizer, epoch, normalizer):
         auc_scores = AverageMeter()
 
     # Create StructData instance with training data
-    train_data = [(sid, target) for sid, target in id_loader.dataset.id_prop_data]
+    train_data = list(id_loader.dataset.id_prop_data)
     struct_dataset = StructData(
         id_prop_data=train_data,
         root_dir=args.root_dir,
@@ -424,7 +441,7 @@ def train(id_loader, model, criterion, optimizer, epoch, normalizer):
         # Get batch data
         batch_data = []
         for sid, target in zip(struct_ids, targets):
-            idx = next(i for i, (s, _) in enumerate(struct_dataset.id_prop_data) if s == sid)
+            idx = next(i for i, row in enumerate(struct_dataset.id_prop_data) if row[0] == sid)
             batch_data.append(struct_dataset[idx])
         
         # Pass complete tuples to collate_pool
@@ -447,8 +464,20 @@ def train(id_loader, model, criterion, optimizer, epoch, normalizer):
                          input[3])
 
         # Convert targets to tensor
-        target = torch.tensor([float(t) for t in targets], dtype=torch.float)
-        target = target.view(-1, 1)
+        if isinstance(targets, torch.Tensor):
+            target = targets
+        else:
+            if args.out_dim > 1:
+                batch_targets = []
+                for t in targets:
+                    if isinstance(t, (np.ndarray, list)):
+                        batch_targets.append(torch.tensor(t, dtype=torch.float))
+                    else:
+                        batch_targets.append(torch.tensor([float(t)], dtype=torch.float))
+                target = torch.stack(batch_targets, dim=0)
+            else:
+                target = torch.tensor([float(t) for t in targets], dtype=torch.float)
+                target = target.view(-1, 1)
         target = target.to(device)
 
         # normalize target
@@ -542,7 +571,12 @@ def validate(id_loader, model, criterion, normalizer, test=False, filename=None)
         test_struct_ids = []
 
     # Create StructData instance with validation/test data
-    val_data = [(sid, target) for sid, target in id_loader.dataset.id_prop_data]
+    if hasattr(id_loader.dataset, 'id_prop_data'):
+        val_data = list(id_loader.dataset.id_prop_data)
+    elif hasattr(id_loader.dataset, 'dataset'):
+        val_data = list(id_loader.dataset.dataset.id_prop_data)
+    else:
+        raise ValueError("Unable to find id_prop_data in dataset")
     struct_dataset = StructData(
         id_prop_data=val_data,
         root_dir=args.root_dir,
@@ -567,7 +601,7 @@ def validate(id_loader, model, criterion, normalizer, test=False, filename=None)
         # Get batch data
         batch_data = []
         for sid, target in zip(struct_ids, targets):
-            idx = next(i for i, (s, _) in enumerate(struct_dataset.id_prop_data) if s == sid)
+            idx = next(i for i, row in enumerate(struct_dataset.id_prop_data) if row[0] == sid)
             batch_data.append(struct_dataset[idx])
         
         # Pass complete tuples to collate_pool
@@ -595,8 +629,20 @@ def validate(id_loader, model, criterion, normalizer, test=False, filename=None)
                              input[3])
 
         # Convert targets to tensor
-        target = torch.tensor([float(t) for t in targets], dtype=torch.float)
-        target = target.view(-1, 1)
+        if isinstance(targets, torch.Tensor):
+            target = targets
+        else:
+            if args.out_dim > 1:
+                batch_targets = []
+                for t in targets:
+                    if isinstance(t, (np.ndarray, list)):
+                        batch_targets.append(torch.tensor(t, dtype=torch.float))
+                    else:
+                        batch_targets.append(torch.tensor([float(t)], dtype=torch.float))
+                target = torch.stack(batch_targets, dim=0)
+            else:
+                target = torch.tensor([float(t) for t in targets], dtype=torch.float)
+                target = target.view(-1, 1)
         target = target.to(device)
 
         if args.task == 'regression':
@@ -625,8 +671,12 @@ def validate(id_loader, model, criterion, normalizer, test=False, filename=None)
             if test:
                 test_pred = normalizer.denorm(output.data)
                 test_target = target
-                test_preds += test_pred.view(-1).tolist()
-                test_targets += test_target.view(-1).tolist()
+                if args.out_dim > 1:
+                    test_preds += test_pred.cpu().tolist()
+                    test_targets += test_target.cpu().tolist()
+                else:
+                    test_preds += test_pred.view(-1).tolist()
+                    test_targets += test_target.view(-1).tolist()
                 test_struct_ids += struct_ids
         else:
             accuracy, precision, recall, fscore, auc_score = \
@@ -681,7 +731,25 @@ def validate(id_loader, model, criterion, normalizer, test=False, filename=None)
             writer = csv.writer(f)
             for struct_id, target, pred in zip(test_struct_ids, test_targets,
                                                test_preds):
-                writer.writerow((struct_id, target, pred))
+                if args.out_dim > 1:
+                    if isinstance(target, torch.Tensor):
+                        target = target.cpu().numpy().tolist()
+                    elif isinstance(target, np.ndarray):
+                        target = target.tolist()
+                    elif not isinstance(target, list):
+                        target = [target]
+                    
+                    if isinstance(pred, torch.Tensor):
+                        pred = pred.cpu().numpy().tolist()
+                    elif isinstance(pred, np.ndarray):
+                        pred = pred.tolist()
+                    elif not isinstance(pred, list):
+                        pred = [pred]
+                    
+                    row = [struct_id] + target + pred
+                    writer.writerow(row)
+                else:
+                    writer.writerow((struct_id, target, pred))
     else:
         star_label = '*'
     if args.task == 'regression':
@@ -700,8 +768,12 @@ class Normalizer(object):
     def __init__(self, tensor):
         """tensor is taken as a sample to calculate the mean and std"""
         if isinstance(tensor, torch.Tensor):
-            self.mean = torch.mean(tensor)
-            self.std = torch.std(tensor)
+            if tensor.dim() > 1:
+                self.mean = torch.mean(tensor, dim=0, keepdim=False)
+                self.std = torch.std(tensor, dim=0, keepdim=False)
+            else:
+                self.mean = torch.mean(tensor)
+                self.std = torch.std(tensor)
         else:
             self.mean = tensor
             self.std = 1.0
@@ -737,8 +809,8 @@ def mae(prediction, target):
     Parameters
     ----------
 
-    prediction: torch.Tensor (N, 1)
-    target: torch.Tensor (N, 1)
+    prediction: torch.Tensor (N, out_dim)
+    target: torch.Tensor (N, out_dim)
     """
     return torch.mean(torch.abs(target - prediction))
 

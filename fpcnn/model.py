@@ -84,7 +84,7 @@ class CrystalGraphConvNet(nn.Module):
     """
     def __init__(self, orig_atom_fea_len, nbr_fea_len,
                  atom_fea_len=64, n_conv=3, h_fea_len=128, n_h=1,
-                 classification=False):
+                 classification=False, out_dim=1):
         """
         Initialize CrystalGraphConvNet.
 
@@ -103,9 +103,14 @@ class CrystalGraphConvNet(nn.Module):
           Number of hidden features after pooling
         n_h: int
           Number of hidden layers after pooling
+        classification: bool
+          Whether performing classification task
+        out_dim: int
+          Number of output components (1 for scalar, >1 for vector/tensor)
         """
         super(CrystalGraphConvNet, self).__init__()
         self.classification = classification
+        self.out_dim = out_dim
         self.embedding = nn.Linear(orig_atom_fea_len, atom_fea_len)
         self.convs = nn.ModuleList([AtomConvLayer(atom_fea_len=atom_fea_len,
                                     nbr_fea_len=nbr_fea_len)
@@ -120,7 +125,7 @@ class CrystalGraphConvNet(nn.Module):
         if self.classification:
             self.fc_out = nn.Linear(h_fea_len, 2)
         else:
-            self.fc_out = nn.Linear(h_fea_len, 1)
+            self.fc_out = nn.Linear(h_fea_len, self.out_dim)
         if self.classification:
             self.logsoftmax = nn.LogSoftmax(dim=1)
             self.dropout = nn.Dropout()
@@ -148,8 +153,8 @@ class CrystalGraphConvNet(nn.Module):
         Returns
         -------
 
-        prediction: nn.Variable shape (N, )
-          Atom hidden features after convolution
+        prediction: nn.Variable shape (N0, out_dim)
+          Crystal-level predictions (scalar or tensor components)
 
         """
         atom_fea = self.embedding(atom_fea)
