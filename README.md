@@ -8,11 +8,11 @@
 
 ## Change log
 
-- **Extended to support tensor properties prediction** (elasticity tensors, dielectric tensors, etc.)
-  - Added `--out-dim` argument to specify number of output components (1 for scalar, 3 for vector, 6/21/36 for tensors)
-  - Introduced `TensorTargetData` class to handle multi-column CSV format for tensor properties
-  - Updated model architecture to output configurable dimensions
-  - Updated `Normalizer` to handle component-wise normalization for tensor targets
+- **Extended to support tensor properties prediction** (elasticity tensors, dielectric tensors, etc.) \
+  Added `--out-dim` argument to specify number of output components (1 for scalar, 3 for vector, 6/21/36 for tensors) \
+  Introduced `TensorTargetData` class to handle multi-column CSV format for tensor properties \
+  Updated model architecture to output configurable dimensions \
+  Updated `Normalizer` to handle component-wise normalization for tensor targets
 - Using atomic-centered Gaussian Overlap Matrix (GOM) Fingerprint vectors as atomic features
 - Switch reading pymatgen structures from CIF to POSCAR
 - Add `drop_last` option in `get_train_val_test_loader`
@@ -392,21 +392,7 @@ For CGCNN framework, please cite:
 }
 ```
 
-If you use the [libfp library](https://github.com/Rutgers-ZRG/libfp), please cite:
-```
-@article{taoEOSnetEmbeddedOverlap2025,
-  title = {EOSnet: Embedded Overlap Structures for Graph Neural Networks in Predicting Material Properties},
-  author = {Tao, Shuo and Zhu, Li},
-  journal = {J. Phys. Chem. Lett.},
-  volume = {16},
-  pages = {717-724},
-  year = {2025},
-  doi = {10.1021/acs.jpclett.4c03179},
-  url = {https://doi.org/10.1021/acs.jpclett.4c03179}
-}
-```
-
-And the original fingerprint algorithm paper:
+For Fingerprint library ([libfp](https://github.com/Rutgers-ZRG/libfp)), please cite:
 ```
 @article{zhuFingerprintBasedMetric2016,
   title = {A Fingerprint Based Metric for Measuring Similarities of Crystalline Structures},
